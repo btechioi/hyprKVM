@@ -58,8 +58,12 @@ impl MonitorLayout {
                     name: mon.name.clone(),
                     x: mon.x,
                     y: mon.y,
-                    width: mon.width,
-                    height: mon.height,
+                    // Store dimensions in LOGICAL pixels (physical / scale) so
+                    // adjacency, bounds and edge detection agree with the
+                    // logical coordinate space used by the cursor and by
+                    // fractional scaling (e.g. 0.67, 1.5).
+                    width: (mon.width as f32 / mon.scale).round() as u32,
+                    height: (mon.height as f32 / mon.scale).round() as u32,
                     scale: mon.scale,
                     active_workspace_id: mon.active_workspace.id,
                     active_workspace_name: mon.active_workspace.name.clone(),
@@ -297,5 +301,37 @@ mod tests {
         assert!(layout.is_at_edge(Direction::Right));
         assert!(layout.is_at_edge(Direction::Up));
         assert!(layout.is_at_edge(Direction::Down));
+    }
+
+    #[test]
+    fn test_fractional_scaling_adjacency() {
+        // eDP-1 at 0x0 with 1920x1080 physical @ 0.67 scale => ~2866x1612 logical
+        // DP-2 at 2866x0 with 1920x1080 @ 1.0
+        fn make_scaled(name: &str, x: i32, y: i32, w: u32, h: u32, scale: f32, focused: bool) -> Monitor {
+            Monitor {
+                id: 0,
+                name: name.to_string(),
+                description: String::new(),
+                x,
+                y,
+                width: w,
+                height: h,
+                scale,
+                active_workspace: WorkspaceRef {
+                    id: 1,
+                    name: "1".to_string(),
+                },
+                focused,
+            }
+        }
+        let monitors = vec![
+            make_scaled("eDP-1", 0, 0, 1920, 1080, 0.67, true),
+            make_scaled("DP-2", 2866, 0, 1920, 1080, 1.0, false),
+        ];
+        let layout = MonitorLayout::from_monitors(&monitors);
+        let e = layout.get("eDP-1").unwrap();
+        assert_eq!(e.adjacency.right, Some("DP-2".to_string()));
+        let d = layout.get("DP-2").unwrap();
+        assert_eq!(d.adjacency.left, Some("eDP-1".to_string()));
     }
 }
