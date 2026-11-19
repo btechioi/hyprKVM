@@ -176,7 +176,7 @@
             # Wrap the binary so the Wayland connection (and clipboard sync)
             # actually works.
             postInstall = ''
-              wrapProgram $out/bin/hyprkvm \\
+              wrapProgram $out/bin/hyprkvm \
                 --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath libDeps}
             '';
 
