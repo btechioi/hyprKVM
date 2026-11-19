@@ -1133,6 +1133,32 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                     if let Ok(cursor) = hypr_client.cursor_pos().await {
                         let (cx, cy) = (cursor.x, cursor.y);
 
+                        // Repulsion zone: if the cursor is approaching (but not yet at)
+                        // a screen edge that has a peer, nudge it inward so it doesn't
+                        // sit on the trigger and bounce back after a transfer.
+                        const APPROACH_ZONE: i32 = 15;
+                        const NUDGE: i32 = 25;
+                        let mut nudged = false;
+                        let current_state = transfer_manager.state().await;
+                        if current_state.is_local() {
+                            if cx <= APPROACH_ZONE && cx > EDGE_THRESHOLD {
+                                let _ = hypr_client.dispatch("movecursor", &format!("{} {}", NUDGE, cy)).await;
+                                nudged = true;
+                            } else if cx >= (screen_width as i32 - APPROACH_ZONE) && cx < (screen_width as i32 - EDGE_THRESHOLD) {
+                                let _ = hypr_client.dispatch("movecursor", &format!("{} {}", screen_width as i32 - NUDGE, cy)).await;
+                                nudged = true;
+                            } else if cy <= screen_min_y + APPROACH_ZONE && cy > screen_min_y + EDGE_THRESHOLD {
+                                let _ = hypr_client.dispatch("movecursor", &format!("{} {}", cx, screen_min_y + NUDGE)).await;
+                                nudged = true;
+                            } else if cy >= (screen_max_y as i32 - APPROACH_ZONE) && cy < (screen_max_y as i32 - EDGE_THRESHOLD) {
+                                let _ = hypr_client.dispatch("movecursor", &format!("{} {}", cx, screen_max_y as i32 - NUDGE)).await;
+                                nudged = true;
+                            }
+                        }
+                        if nudged {
+                            continue;
+                        }
+
                         // Determine if cursor is at a screen edge
                         // For Left/Right: use global screen bounds
                         // For Up/Down: check per-monitor bounds (different monitors have different heights)
