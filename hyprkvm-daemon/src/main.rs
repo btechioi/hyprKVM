@@ -334,7 +334,7 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
     // Cooldown after control returns to prevent immediate bounce-back
     // Stores (timestamp, return_direction) - the direction is the arrow key the user pressed to return
     let mut last_control_return: Option<(std::time::Instant, Direction)> = None;
-    const CONTROL_RETURN_COOLDOWN_MS: u64 = 300; // 300ms cooldown - spurious keypresses happen within ~100-400ms
+    const CONTROL_RETURN_COOLDOWN_MS: u64 = 600; // 600ms cooldown - prevents edge-barrier bounce-back
 
     // Connection storage: direction -> peer connection
     let peers: Arc<RwLock<HashMap<Direction, network::FramedConnection>>> =
@@ -1006,6 +1006,19 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                 // Handle edge events from layer-shell barriers (for inter-monitor edges)
                 while let Some(edge_event) = edge_capture.try_recv() {
                     let direction = edge_event.direction;
+
+                    // Only act on edge events while we own the cursor (Local state).
+                    // While transferring/receiving/relaying, the barriers are stale
+                    // and would otherwise trigger bounce-back loops.
+                    let current_state = transfer_manager.state().await;
+                    if !matches!(current_state, transfer::TransferState::Local) {
+                        tracing::debug!(
+                            "EDGE: {:?} ignored (not Local: {:?})",
+                            direction,
+                            current_state
+                        );
+                        continue;
+                    }
 
                     // Verify cursor is actually at screen boundary using Hyprland
                     // (barrier placement can be wrong on multi-monitor setups)
