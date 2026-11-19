@@ -1136,23 +1136,32 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                         // Repulsion zone: if the cursor is approaching (but not yet at)
                         // a screen edge that has a peer, nudge it inward so it doesn't
                         // sit on the trigger and bounce back after a transfer.
+                        // Repulsion zone: nudge the cursor inward via uinput relative
+                        // motion when it approaches (but isn't at) an edge with a peer,
+                        // so it doesn't sit on the trigger and bounce back.
                         const APPROACH_ZONE: i32 = 15;
-                        const NUDGE: i32 = 25;
                         let mut nudged = false;
                         let current_state = transfer_manager.state().await;
                         if current_state.is_local() {
-                            if cx <= APPROACH_ZONE && cx > EDGE_THRESHOLD {
-                                let _ = hypr_client.dispatch("movecursor", &format!("{} {}", NUDGE, cy)).await;
-                                nudged = true;
-                            } else if cx >= (screen_width as i32 - APPROACH_ZONE) && cx < (screen_width as i32 - EDGE_THRESHOLD) {
-                                let _ = hypr_client.dispatch("movecursor", &format!("{} {}", screen_width as i32 - NUDGE, cy)).await;
-                                nudged = true;
-                            } else if cy <= screen_min_y + APPROACH_ZONE && cy > screen_min_y + EDGE_THRESHOLD {
-                                let _ = hypr_client.dispatch("movecursor", &format!("{} {}", cx, screen_min_y + NUDGE)).await;
-                                nudged = true;
-                            } else if cy >= (screen_max_y as i32 - APPROACH_ZONE) && cy < (screen_max_y as i32 - EDGE_THRESHOLD) {
-                                let _ = hypr_client.dispatch("movecursor", &format!("{} {}", cx, screen_max_y as i32 - NUDGE)).await;
-                                nudged = true;
+                            // Ensure we have a uinput emulator
+                            if input_emulator.is_none() {
+                                input_emulator = input::InputEmulator::new().ok();
+                            }
+                            if let Some(ref mut emu) = input_emulator {
+                                if cx <= APPROACH_ZONE && cx > EDGE_THRESHOLD {
+                                    // Nudge right (away from left edge)
+                                    let _ = emu.pointer.motion(25.0, 0.0);
+                                    nudged = true;
+                                } else if cx >= (screen_width as i32 - APPROACH_ZONE) && cx < (screen_width as i32 - EDGE_THRESHOLD) {
+                                    let _ = emu.pointer.motion(-25.0, 0.0);
+                                    nudged = true;
+                                } else if cy <= screen_min_y + APPROACH_ZONE && cy > screen_min_y + EDGE_THRESHOLD {
+                                    let _ = emu.pointer.motion(0.0, 25.0);
+                                    nudged = true;
+                                } else if cy >= (screen_max_y as i32 - APPROACH_ZONE) && cy < (screen_max_y as i32 - EDGE_THRESHOLD) {
+                                    let _ = emu.pointer.motion(0.0, -25.0);
+                                    nudged = true;
+                                }
                             }
                         }
                         if nudged {
@@ -1228,40 +1237,14 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                                 if has_peer {
                                                     // Check if we're in ReceivedControl state from this direction
                                                     let current_state = transfer_manager.state().await;
-                                                    if let transfer::TransferState::ReceivedControl { from, entered_at, .. } = &current_state {
-                                                        // Add cooldown after entering ReceivedControl to prevent immediate return
-                                                        // (cursor warp may not have taken effect yet, or stale position from polling)
-                                                        const RECEIVED_CONTROL_COOLDOWN_MS: u128 = 1500;
-                                                        let time_in_state = entered_at.elapsed().as_millis();
-
-                                                        if time_in_state < RECEIVED_CONTROL_COOLDOWN_MS {
-                                                            tracing::debug!(
-                                                                "CURSOR EDGE: {:?} - just entered ReceivedControl {}ms ago, waiting",
-                                                                edge_dir, time_in_state
-                                                            );
-                                                            edge_dwell_start = None;
-                                                            continue;
-                                                        }
-
-                                                        if *from == edge_dir {
-                                                            info!(
-                                                                "CURSOR EDGE: {:?} at ({}, {}) - returning control",
-                                                                edge_dir, cx, cy
-                                                            );
-                                                            if let Err(e) = transfer_manager.return_control().await {
-                                                                tracing::warn!("Failed to return control: {}", e);
-                                                            } else {
-                                                                // Set cooldown to prevent immediate re-transfer
-                                                                last_control_return = Some((std::time::Instant::now(), edge_dir));
-                                                            }
-                                                            edge_dwell_start = None;
-                                                            continue;
-                                                        } else {
-                                                            tracing::debug!(
-                                                                "CURSOR EDGE: {:?} - ReceivedControl from {:?}, not matching",
-                                                                edge_dir, from
-                                                            );
-                                                        }
+                                                    if let transfer::TransferState::ReceivedControl { from, .. } = &current_state {
+                                                        // While receiving control, never auto-return from polling.
+                                                        // Return only happens via the peer's Leave message.
+                                                        // (Previously, a cooldown then return_control() here caused
+                                                        // bounce-back loops because the cursor sat on the trigger edge.)
+                                                        let _ = from;
+                                                        edge_dwell_start = None;
+                                                        continue;
                                                     } else {
                                                         tracing::debug!(
                                                             "CURSOR EDGE: {:?} - state is {:?}, not ReceivedControl",
@@ -1389,15 +1372,6 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                         ).await {
                                             Ok(pos) => {
                                                 info!("Positioned cursor at {:?}", pos);
-                                                // Actually move the cursor so it isn't sitting on
-                                                // the edge barrier (which would re-trigger and bounce).
-                                                match hypr_client
-                                                    .dispatch("movecursor", &format!("{} {}", pos.0, pos.1))
-                                                    .await
-                                                {
-                                                    Ok(()) => info!("Moved cursor to ({}, {})", pos.0, pos.1),
-                                                    Err(e) => tracing::warn!("movecursor failed: {}", e),
-                                                }
                                             }
                                             Err(e) => {
                                                 tracing::error!("Failed to handle Enter: {}", e);
