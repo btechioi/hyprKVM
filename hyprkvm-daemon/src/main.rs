@@ -1261,14 +1261,20 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                                         }
                                                     }
 
-                                                    if barrier_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                                                    if !current_state.is_local() {
+                                                        // Not in Local state - don't initiate transfers from polling.
+                                                        // (Prevents bounce-back loops when receiving/forwarding control.)
+                                                        tracing::debug!(
+                                                            "CURSOR EDGE: {:?} at ({}, {}) - not Local ({:?}), ignoring",
+                                                            edge_dir, cx, cy, current_state
+                                                        );
+                                                    } else if barrier_enabled.load(std::sync::atomic::Ordering::SeqCst) {
                                                         info!(
                                                             "CURSOR EDGE: {:?} at ({}, {}) - barrier enabled, blocking",
                                                             edge_dir, cx, cy
                                                         );
-                                                    } else if !input_grabber.has_devices() && current_state.is_local() {
+                                                    } else if !input_grabber.has_devices() {
                                                         // No devices and in Local state - can't initiate (no input to grab)
-                                                        // Note: if in ReceivedControl, we can still relay
                                                         tracing::debug!(
                                                             "CURSOR EDGE: {:?} at ({}, {}) - no devices, can't initiate from Local",
                                                             edge_dir, cx, cy
