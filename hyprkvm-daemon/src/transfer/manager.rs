@@ -355,7 +355,7 @@ impl TransferManager {
         let screen_height = (screen_max_y - screen_min_y) as f64;
 
         // Offset from edge to prevent immediate re-triggering of edge detection
-        const EDGE_INSET: i32 = 30;
+        const EDGE_INSET: i32 = 100;
 
         let cursor_pos = match payload.cursor_pos {
             CursorEntryPos::EdgeRelative(rel) => {

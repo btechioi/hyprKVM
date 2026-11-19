@@ -329,12 +329,12 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
     let mut last_cursor_pos: Option<(i32, i32)> = None;
     let mut edge_dwell_start: Option<(Direction, std::time::Instant)> = None;
     const EDGE_THRESHOLD: i32 = 2; // Pixels from edge to count as "at edge"
-    const EDGE_DWELL_MS: u64 = 50; // How long cursor must be at edge to trigger
+    const EDGE_DWELL_MS: u64 = 200; // How long cursor must be at edge to trigger (was 50; prevents accidental triggers)
 
     // Cooldown after control returns to prevent immediate bounce-back
     // Stores (timestamp, return_direction) - the direction is the arrow key the user pressed to return
     let mut last_control_return: Option<(std::time::Instant, Direction)> = None;
-    const CONTROL_RETURN_COOLDOWN_MS: u64 = 600; // 600ms cooldown - prevents edge-barrier bounce-back
+    const CONTROL_RETURN_COOLDOWN_MS: u64 = 1000; // 1000ms cooldown - prevents edge-barrier bounce-back
 
     // Connection storage: direction -> peer connection
     let peers: Arc<RwLock<HashMap<Direction, network::FramedConnection>>> =
@@ -1205,7 +1205,7 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                                     if let transfer::TransferState::ReceivedControl { from, entered_at, .. } = &current_state {
                                                         // Add cooldown after entering ReceivedControl to prevent immediate return
                                                         // (cursor warp may not have taken effect yet, or stale position from polling)
-                                                        const RECEIVED_CONTROL_COOLDOWN_MS: u128 = 500;
+                                                        const RECEIVED_CONTROL_COOLDOWN_MS: u128 = 1500;
                                                         let time_in_state = entered_at.elapsed().as_millis();
 
                                                         if time_in_state < RECEIVED_CONTROL_COOLDOWN_MS {
@@ -1363,6 +1363,15 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                         ).await {
                                             Ok(pos) => {
                                                 info!("Positioned cursor at {:?}", pos);
+                                                // Actually move the cursor so it isn't sitting on
+                                                // the edge barrier (which would re-trigger and bounce).
+                                                match hypr_client
+                                                    .dispatch("movecursor", &format!("{} {}", pos.0, pos.1))
+                                                    .await
+                                                {
+                                                    Ok(()) => info!("Moved cursor to ({}, {})", pos.0, pos.1),
+                                                    Err(e) => tracing::warn!("movecursor failed: {}", e),
+                                                }
                                             }
                                             Err(e) => {
                                                 tracing::error!("Failed to handle Enter: {}", e);
