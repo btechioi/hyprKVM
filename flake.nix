@@ -168,8 +168,17 @@
               lockFile = ./Cargo.lock;
             };
 
-            nativeBuildInputs = buildDeps;
+            nativeBuildInputs = buildDeps ++ [ pkgs.makeWrapper ];
             buildInputs = libDeps;
+
+            # hyprkvm dlopens libwayland-client (and other libs) at runtime, so
+            # they are not in DT_NEEDED and Nix does not add them to RPATH.
+            # Wrap the binary so the Wayland connection (and clipboard sync)
+            # actually works.
+            postInstall = ''
+              wrapProgram $out/bin/hyprkvm \\
+                --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath libDeps}
+            '';
 
             # Builds both hyprkvm (daemon) and hyprkvm-ctl (CLI)
             # buildRustPackage automatically installs all workspace binaries
