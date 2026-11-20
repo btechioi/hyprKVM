@@ -1007,17 +1007,21 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                 while let Some(edge_event) = edge_capture.try_recv() {
                     let direction = edge_event.direction;
 
-                    // Only act on edge events while we own the cursor (Local state).
-                    // While transferring/receiving/relaying, the barriers are stale
-                    // and would otherwise trigger bounce-back loops.
+                    // Act on edge events in Local state (initiate transfer) and in
+                    // ReceivedControl state when the edge matches the source (return control).
+                    // Ignore all other states to avoid bounce-back loops.
                     let current_state = transfer_manager.state().await;
-                    if !matches!(current_state, transfer::TransferState::Local) {
-                        tracing::debug!(
-                            "EDGE: {:?} ignored (not Local: {:?})",
-                            direction,
-                            current_state
-                        );
-                        continue;
+                    match current_state {
+                        transfer::TransferState::Local => {}
+                        transfer::TransferState::ReceivedControl { from, .. } if from == direction => {}
+                        _ => {
+                            tracing::debug!(
+                                "EDGE: {:?} ignored (not Local/return: {:?})",
+                                direction,
+                                current_state
+                            );
+                            continue;
+                        }
                     }
 
                     // Verify cursor is actually at screen boundary using Hyprland
@@ -1063,11 +1067,36 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                     cursor_pos.0,
                                     cursor_pos.1
                                 );
-                                if let Err(e) = transfer_manager.return_control().await {
+                                let edge_rel = match direction {
+                                    Direction::Left | Direction::Right => {
+                                        (cursor_pos.1 - screen_min_y) as f64 / (screen_max_y - screen_min_y) as f64
+                                    }
+                                    Direction::Up | Direction::Down => {
+                                        (cursor_pos.0 - screen_min_x) as f64 / (screen_max_x - screen_min_x) as f64
+                                    }
+                                };
+                                if let Err(e) = transfer_manager.return_control(edge_rel).await {
                                     tracing::warn!("Failed to return control: {}", e);
                                 } else {
                                     // Set cooldown to prevent immediate re-transfer
                                     last_control_return = Some((std::time::Instant::now(), direction));
+                                    // Nudge the cursor inward so it doesn't sit on the trigger edge
+                                    if input_emulator.is_none() {
+                                        input_emulator = input::InputEmulator::new().ok();
+                                    }
+                                    if let Some(ref mut emu) = input_emulator {
+                                        let (nx, ny) = match direction {
+                                            Direction::Left => ((screen_min_x + 20) as f64 / screen_width as f64,
+                                                (screen_min_y as f64 + screen_height as f64 / 2.0) / screen_height as f64),
+                                            Direction::Right => ((screen_max_x - 20) as f64 / screen_width as f64,
+                                                (screen_min_y as f64 + screen_height as f64 / 2.0) / screen_height as f64),
+                                            Direction::Up => ((screen_min_x as f64 + screen_width as f64 / 2.0) / screen_width as f64,
+                                                (screen_min_y + 20) as f64 / screen_height as f64),
+                                            Direction::Down => ((screen_min_x as f64 + screen_width as f64 / 2.0) / screen_width as f64,
+                                                (screen_max_y - 20) as f64 / screen_height as f64),
+                                        };
+                                        emu.pointer.motion_absolute(nx, ny, screen_width as u32, screen_height as u32);
+                                    }
                                 }
                                 continue;
                             }
@@ -1132,41 +1161,6 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                 if capture_direction.is_none() {
                     if let Ok(cursor) = hypr_client.cursor_pos().await {
                         let (cx, cy) = (cursor.x, cursor.y);
-
-                        // Repulsion zone: if the cursor is approaching (but not yet at)
-                        // a screen edge that has a peer, nudge it inward so it doesn't
-                        // sit on the trigger and bounce back after a transfer.
-                        // Repulsion zone: nudge the cursor inward via uinput relative
-                        // motion when it approaches (but isn't at) an edge with a peer,
-                        // so it doesn't sit on the trigger and bounce back.
-                        const APPROACH_ZONE: i32 = 15;
-                        let mut nudged = false;
-                        let current_state = transfer_manager.state().await;
-                        if current_state.is_local() {
-                            // Ensure we have a uinput emulator
-                            if input_emulator.is_none() {
-                                input_emulator = input::InputEmulator::new().ok();
-                            }
-                            if let Some(ref mut emu) = input_emulator {
-                                if cx <= APPROACH_ZONE && cx > EDGE_THRESHOLD {
-                                    // Nudge right (away from left edge)
-                                    let _ = emu.pointer.motion(25.0, 0.0);
-                                    nudged = true;
-                                } else if cx >= (screen_width as i32 - APPROACH_ZONE) && cx < (screen_width as i32 - EDGE_THRESHOLD) {
-                                    let _ = emu.pointer.motion(-25.0, 0.0);
-                                    nudged = true;
-                                } else if cy <= screen_min_y + APPROACH_ZONE && cy > screen_min_y + EDGE_THRESHOLD {
-                                    let _ = emu.pointer.motion(0.0, 25.0);
-                                    nudged = true;
-                                } else if cy >= (screen_max_y as i32 - APPROACH_ZONE) && cy < (screen_max_y as i32 - EDGE_THRESHOLD) {
-                                    let _ = emu.pointer.motion(0.0, -25.0);
-                                    nudged = true;
-                                }
-                            }
-                        }
-                        if nudged {
-                            continue;
-                        }
 
                         // Determine if cursor is at a screen edge
                         // For Left/Right: use global screen bounds
@@ -1378,6 +1372,17 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                         ).await {
                                             Ok(pos) => {
                                                 info!("Positioned cursor at {:?}", pos);
+                                                // Move the cursor to the inward position via the
+                                                // virtual pointer so it does not sit on the edge
+                                                // barrier and immediately bounce back.
+                                                if input_emulator.is_none() {
+                                                    input_emulator = input::InputEmulator::new().ok();
+                                                }
+                                                if let Some(ref mut emu) = input_emulator {
+                                                    let nx = pos.0 as f64 / screen_width as f64;
+                                                    let ny = pos.1 as f64 / screen_height as f64;
+                                                    emu.pointer.motion_absolute(nx, ny, screen_width as u32, screen_height as u32);
+                                                }
                                             }
                                             Err(e) => {
                                                 tracing::error!("Failed to handle Enter: {}", e);
@@ -1385,10 +1390,33 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                         }
                                     }
                                     Message::EnterAck(ack) => {
-                                        info!("Received EnterAck: success={}", ack.success);
+                                        let ack_success = ack.success;
+                                        info!("Received EnterAck: success={}", ack_success);
                                         if let Err(e) = transfer_manager.handle_enter_ack(ack).await {
                                             // Usually a benign race condition (collision resolved)
                                             tracing::debug!("Failed to handle EnterAck: {}", e);
+                                        } else if ack_success {
+                                            // Position the cursor inward on the initiator so it
+                                            // does not remain on the edge trigger and re-fire.
+                                            let state = transfer_manager.state().await;
+                                            if let transfer::TransferState::RemoteActive { target, .. } = state {
+                                                if input_emulator.is_none() {
+                                                    input_emulator = input::InputEmulator::new().ok();
+                                                }
+                                                if let Some(ref mut emu) = input_emulator {
+                                                    let (nx, ny) = match target {
+                                                        Direction::Left => ((screen_min_x + 20) as f64 / screen_width as f64,
+                                                            (screen_min_y as f64 + screen_height as f64 / 2.0) / screen_height as f64),
+                                                        Direction::Right => ((screen_max_x - 20) as f64 / screen_width as f64,
+                                                            (screen_min_y as f64 + screen_height as f64 / 2.0) / screen_height as f64),
+                                                        Direction::Up => ((screen_min_x as f64 + screen_width as f64 / 2.0) / screen_width as f64,
+                                                            (screen_min_y + 20) as f64 / screen_height as f64),
+                                                        Direction::Down => ((screen_min_x as f64 + screen_width as f64 / 2.0) / screen_width as f64,
+                                                            (screen_max_y - 20) as f64 / screen_height as f64),
+                                                    };
+                                                    emu.pointer.motion_absolute(nx, ny, screen_width as u32, screen_height as u32);
+                                                }
+                                            }
                                         }
                                     }
                                     Message::Leave(payload) => {
@@ -1643,6 +1671,8 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                         }
 
                         input_grabber.start();
+                        // Hide the cursor while control is elsewhere so tooltips don't linger
+                        let _ = hypr_client.eval("hl.config({cursor = {invisible = true}})").await;
                     }
                     transfer::TransferEvent::StopCapture => {
                         info!("Stopping input capture");
@@ -1704,6 +1734,8 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                             last_control_return = Some((std::time::Instant::now(), return_direction));
                             tracing::info!("Set cooldown after StopCapture for direction {:?} (peer-initiated return)", return_direction);
                         }
+                        // Control is back locally; show the cursor again
+                        let _ = hypr_client.eval("hl.config({cursor = {invisible = false}})").await;
                     }
                     transfer::TransferEvent::StartInjection { from } => {
                         info!("Starting input injection from {:?}", from);
@@ -1719,6 +1751,8 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                 }
                             }
                         }
+                        // Control is here now; make the cursor visible
+                        let _ = hypr_client.eval("hl.config({cursor = {invisible = false}})").await;
                     }
                     transfer::TransferEvent::StopInjection => {
                         info!("Stopping input injection");
@@ -1728,6 +1762,8 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                         if let Some(ref mut emu) = input_emulator {
                             emu.keyboard.reset_all_keys();
                         }
+                        // Control is back locally; show the cursor again
+                        let _ = hypr_client.eval("hl.config({cursor = {invisible = false}})").await;
                     }
                     transfer::TransferEvent::StartRelay { from, to } => {
                         info!("Starting input relay: {:?} -> {:?}", from, to);
@@ -1950,12 +1986,38 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                                 if from == direction {
                                     // Return control to source machine
                                     tracing::info!("Keyboard return: at edge, returning control to {:?}", direction);
-                                    if let Err(e) = transfer_manager.return_control().await {
+                                    let cursor_pos = hypr_client.cursor_pos().await.map(|c| (c.x, c.y)).unwrap_or((0, 0));
+                                    let edge_rel = match direction {
+                                        Direction::Left | Direction::Right => {
+                                            (cursor_pos.1 - screen_min_y) as f64 / (screen_max_y - screen_min_y) as f64
+                                        }
+                                        Direction::Up | Direction::Down => {
+                                            (cursor_pos.0 - screen_min_x) as f64 / (screen_max_x - screen_min_x) as f64
+                                        }
+                                    };
+                                    if let Err(e) = transfer_manager.return_control(edge_rel).await {
                                         tracing::warn!("Failed to return control: {}", e);
                                         IpcResponse::Error { message: format!("Return failed: {}", e) }
                                     } else {
                                         // Set cooldown to prevent immediate re-transfer (bounce-back)
                                         last_control_return = Some((std::time::Instant::now(), direction));
+                                        // Nudge cursor inward to avoid sitting on the trigger edge
+                                        if input_emulator.is_none() {
+                                            input_emulator = input::InputEmulator::new().ok();
+                                        }
+                                        if let Some(ref mut emu) = input_emulator {
+                                            let (nx, ny) = match direction {
+                                                Direction::Left => ((screen_min_x + 20) as f64 / screen_width as f64,
+                                                    (screen_min_y as f64 + screen_height as f64 / 2.0) / screen_height as f64),
+                                                Direction::Right => ((screen_max_x - 20) as f64 / screen_width as f64,
+                                                    (screen_min_y as f64 + screen_height as f64 / 2.0) / screen_height as f64),
+                                                Direction::Up => ((screen_min_x as f64 + screen_width as f64 / 2.0) / screen_width as f64,
+                                                    (screen_min_y + 20) as f64 / screen_height as f64),
+                                                Direction::Down => ((screen_min_x as f64 + screen_width as f64 / 2.0) / screen_width as f64,
+                                                    (screen_max_y - 20) as f64 / screen_height as f64),
+                                            };
+                                            emu.pointer.motion_absolute(nx, ny, screen_width as u32, screen_height as u32);
+                                        }
                                         IpcResponse::Transferred { to_machine: neighbor_name.unwrap() }
                                     }
                                 } else {
@@ -2248,7 +2310,21 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                     }
 
                     IpcRequest::Return => {
-                        match transfer_manager.return_control().await {
+                        let state = transfer_manager.state().await;
+                        let edge_rel = if let transfer::TransferState::ReceivedControl { from, .. } = state {
+                            let cursor = hypr_client.cursor_pos().await.map(|c| (c.x, c.y)).unwrap_or((0, 0));
+                            match from {
+                                Direction::Left | Direction::Right => {
+                                    (cursor.1 - screen_min_y) as f64 / (screen_max_y - screen_min_y) as f64
+                                }
+                                Direction::Up | Direction::Down => {
+                                    (cursor.0 - screen_min_x) as f64 / (screen_max_x - screen_min_x) as f64
+                                }
+                            }
+                        } else {
+                            0.5
+                        };
+                        match transfer_manager.return_control(edge_rel).await {
                             Ok(()) => IpcResponse::Ok {
                                 message: "Control returned".to_string(),
                             },

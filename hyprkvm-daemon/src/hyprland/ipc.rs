@@ -120,6 +120,11 @@ impl HyprlandClient {
 
         Ok(())
     }
+
+    /// Evaluate a Hyprland (Lua) expression
+    pub async fn eval(&self, code: &str) -> Result<String, HyprlandError> {
+        self.execute(&format!("eval {}", code)).await
+    }
 }
 
 // ============================================================================

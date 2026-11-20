@@ -355,7 +355,7 @@ impl TransferManager {
         let screen_height = (screen_max_y - screen_min_y) as f64;
 
         // Offset from edge to prevent immediate re-triggering of edge detection
-        const EDGE_INSET: i32 = 100;
+        const EDGE_INSET: i32 = 10;
 
         let cursor_pos = match payload.cursor_pos {
             CursorEntryPos::EdgeRelative(rel) => {
@@ -428,7 +428,9 @@ impl TransferManager {
     }
 
     /// Return control to sender (escape hotkey or reverse edge)
-    pub async fn return_control(&self) -> Result<(), TransferError> {
+    /// `edge_relative` is the cursor position along the edge (0.0-1.0)
+    /// so the receiving machine can place the cursor seamlessly.
+    pub async fn return_control(&self, edge_relative: f64) -> Result<(), TransferError> {
         let mut state = self.state.write().await;
 
         match &*state {
@@ -449,7 +451,7 @@ impl TransferManager {
                 // Send Leave message
                 let leave = Message::Leave(LeavePayload {
                     to_direction: direction,
-                    cursor_pos: CursorEntryPos::EdgeRelative(0.5), // Center for now
+                    cursor_pos: CursorEntryPos::EdgeRelative(edge_relative.clamp(0.0, 1.0)),
                     modifiers: ModifierState::default(),
                     transfer_id: tid,
                 });
