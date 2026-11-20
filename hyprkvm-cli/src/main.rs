@@ -93,6 +93,22 @@ enum Commands {
         action: ConfigAction,
     },
 
+    /// Add a KVM peer (writes to config file)
+    AddPeer {
+        /// Peer name
+        name: String,
+        /// Direction: left, right, up, down
+        direction: String,
+        /// Address (host:port)
+        address: String,
+    },
+
+    /// Remove a KVM peer
+    RemovePeer {
+        /// Peer name
+        name: String,
+    },
+
     /// Reload configuration from file
     Reload,
 
@@ -448,6 +464,72 @@ async fn handle_reconnect(peer: String) -> anyhow::Result<()> {
     handle_ok_or_error(response)
 }
 
+fn config_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("hyprkvm")
+        .join("hyprkvm.toml")
+}
+
+async fn handle_add_peer(name: String, direction: String, address: String) -> anyhow::Result<()> {
+    let path = config_path();
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml::Value = toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()));
+
+    // Ensure machines table exists
+    if !doc.as_table().unwrap().contains_key("machines") {
+        doc.as_table_mut().unwrap().insert("machines".to_string(), toml::Value::Table(toml::map::Map::new()));
+    }
+    let machines = doc.as_table_mut().unwrap().get_mut("machines").unwrap().as_table_mut().unwrap();
+
+    // Ensure neighbors array exists
+    if !machines.contains_key("neighbors") {
+        machines.insert("neighbors".to_string(), toml::Value::Array(vec![]));
+    }
+    let neighbors = machines.get_mut("neighbors").unwrap().as_array_mut().unwrap();
+
+    // Check if peer already exists
+    let exists = neighbors.iter().any(|n| n.get("name").and_then(|v| v.as_str()) == Some(&name));
+    if exists {
+        eprintln!("Peer '{}' already exists. Remove it first.", name);
+        std::process::exit(1);
+    }
+
+    // Add new peer
+    let mut peer = toml::map::Map::new();
+    peer.insert("name".to_string(), toml::Value::String(name.clone()));
+    peer.insert("direction".to_string(), toml::Value::String(direction));
+    peer.insert("address".to_string(), toml::Value::String(address));
+    neighbors.push(toml::Value::Table(peer));
+
+    // Write back
+    let output = toml::to_string_pretty(&doc)?;
+    std::fs::write(&path, output)?;
+    println!("Added peer '{}'. Restart the daemon to apply: hyprkvm daemon", name);
+    Ok(())
+}
+
+async fn handle_remove_peer(name: String) -> anyhow::Result<()> {
+    let path = config_path();
+    let content = std::fs::read_to_string(&path)?;
+    let mut doc: toml::Value = toml::from_str(&content)?;
+
+    let machines = doc.as_table_mut().unwrap().get_mut("machines").unwrap().as_table_mut().unwrap();
+    let neighbors = machines.get_mut("neighbors").unwrap().as_array_mut().unwrap();
+
+    let before = neighbors.len();
+    neighbors.retain(|n| n.get("name").and_then(|v| v.as_str()) != Some(&name));
+    if neighbors.len() == before {
+        eprintln!("Peer '{}' not found.", name);
+        std::process::exit(1);
+    }
+
+    let output = toml::to_string_pretty(&doc)?;
+    std::fs::write(&path, output)?;
+    println!("Removed peer '{}'. Restart the daemon to apply.", name);
+    Ok(())
+}
+
 async fn handle_config_show() -> anyhow::Result<()> {
     let mut client = connect_or_exit().await;
     let response = client.request(&IpcRequest::GetConfig).await?;
@@ -540,6 +622,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Config { action } => match action {
             ConfigAction::Show => handle_config_show().await?,
         },
+        Commands::AddPeer { name, direction, address } => handle_add_peer(name, direction, address).await?,
+        Commands::RemovePeer { name } => handle_remove_peer(name).await?,
         Commands::Reload => handle_reload().await?,
         Commands::Shutdown => handle_shutdown().await?,
         Commands::Logs { lines } => handle_logs(lines).await?,

@@ -1640,10 +1640,12 @@ version = "0.6.12"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs 5.0.1",
  "hyprkvm-common",
  "serde",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]
