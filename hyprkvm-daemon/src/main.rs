@@ -232,6 +232,10 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
         info!("  {} at ({}, {}) {}x{}", mon.name, mon.x, mon.y, mon.width, mon.height);
     }
 
+    // Ensure the cursor is visible on startup (a previous crashed session may
+    // have left it invisible).
+    let _ = hypr_client.eval("hl.config({cursor = {invisible = false}})").await;
+
     // Calculate screen bounds in LOGICAL coordinates (cursor position uses logical coords)
     // Hyprland reports physical dimensions, but cursor_pos() returns logical coordinates
     // Logical size = physical size / scale
@@ -834,6 +838,8 @@ async fn run_daemon(config_path: &std::path::Path) -> anyhow::Result<()> {
                         info!("Escape triggered - stopping capture");
                         capture_direction = None;
                         input_grabber.stop(None); // No recovery needed for escape
+                        // Make the cursor visible again
+                        let _ = hypr_client.eval("hl.config({cursor = {invisible = false}})").await;
 
                         // Send Leave message - we're leaving in the opposite direction (returning to us)
                         let leave = Message::Leave(hyprkvm_common::protocol::LeavePayload {
